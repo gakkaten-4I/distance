@@ -217,7 +217,7 @@ int main(int argc, char *argv[]) {
 
     // List of serial ports
     // std::vector<std::string> serial_ports = {"/dev/tof0", "/dev/tof1", "/dev/tof2", "/dev/tof3", "/dev/tof4", "/dev/tof5", "/dev/tof6", "/dev/tof7"}; // Example ports
-    std::vector<std::string> serial_ports = {"/dev/ttyUSB0"};
+    std::vector<std::string> serial_ports = {"/dev/ttyUSB0","/dev/ttyUSB1"};// TODO: 一次元ライダーのポート名指定
 
     // Vector to hold sensor nodes
     std::vector<std::shared_ptr<SensorNode>> nodes;
