@@ -1,8 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <iostream>
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
+#include <windows.h>
 #include <chrono>
 #include <vector>
 #include <thread>
@@ -32,8 +30,8 @@ public:
     }
 
     ~SensorNode() {
-        if (fd_ >= 0) {
-            close(fd_);
+        if (h_serial_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(h_serial_);
         }
         if (reading_thread_.joinable()) {
             reading_thread_.join();
@@ -41,7 +39,7 @@ public:
     }
 
 private:
-    int fd_ = -1;
+    HANDLE h_serial_ = INVALID_HANDLE_VALUE;
     std::string serial_name_;
     int baudrate_;
     std::thread reading_thread_;
@@ -50,48 +48,48 @@ private:
     std::chrono::seconds reconnect_interval_;
 
     bool open_serial_port(const std::string &port, int baudrate) {
-        fd_ = open(port.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
-        if (fd_ < 0) {
+        h_serial_ = CreateFile(port.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+        if (h_serial_ == INVALID_HANDLE_VALUE) {
             RCLCPP_ERROR(this->get_logger(), "Failed to open serial port %s", port.c_str());
             return false;
         }
 
-        struct termios tty;
-        if (tcgetattr(fd_, &tty) != 0) {
-            RCLCPP_ERROR(this->get_logger(), "Error from tcgetattr");
-            close(fd_);
+        DCB dcbSerialParams = { 0 };
+        dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
+
+        if (!GetCommState(h_serial_, &dcbSerialParams)) {
+            RCLCPP_ERROR(this->get_logger(), "Error from GetCommState");
+            CloseHandle(h_serial_);
             return false;
         }
 
-        cfsetospeed(&tty, B115200);
-        cfsetispeed(&tty, B115200);
+        dcbSerialParams.BaudRate = baudrate;
+        dcbSerialParams.ByteSize = 8;
+        dcbSerialParams.StopBits = ONESTOPBIT;
+        dcbSerialParams.Parity = NOPARITY;
 
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY | ICRNL | INLCR | IGNCR);
-        tty.c_oflag &= ~OPOST;
-        tty.c_cc[VMIN] = 0;  // Non-blocking
-        tty.c_cc[VTIME] = 0; // No timeout
-
-        if (tcsetattr(fd_, TCSANOW, &tty) != 0) {
-            RCLCPP_ERROR(this->get_logger(), "Error from tcsetattr");
-            close(fd_);
+        if (!SetCommState(h_serial_, &dcbSerialParams)) {
+            RCLCPP_ERROR(this->get_logger(), "Error from SetCommState");
+            CloseHandle(h_serial_);
             return false;
         }
 
-        // Flush the serial port buffers
-        tcflush(fd_, TCIOFLUSH);
+        // Set timeouts
+        COMMTIMEOUTS timeouts = { 0 };
+        timeouts.ReadIntervalTimeout = 50;
+        timeouts.ReadTotalTimeoutConstant = 50;
+        timeouts.ReadTotalTimeoutMultiplier = 10;
+        SetCommTimeouts(h_serial_, &timeouts);
+
         RCLCPP_INFO(this->get_logger(), "Successfully opened serial port %s", port.c_str());
-
         return true;
     }
 
     void close_serial_port() {
-        if (fd_ >= 0) {
-            close(fd_);
-            fd_ = -1;
+        if (h_serial_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(h_serial_);
+            h_serial_ = INVALID_HANDLE_VALUE;
         }
     }
 
@@ -99,34 +97,32 @@ private:
         RCLCPP_INFO(this->get_logger(), "Started reading sensor data from %s", serial_name_.c_str());
 
         while (rclcpp::ok()) {
-            // Check if the serial port is open, otherwise attempt to reconnect
-            if (fd_ < 0) {
+            if (h_serial_ == INVALID_HANDLE_VALUE) {
                 if (!open_serial_port(serial_name_, baudrate_)) {
                     std::this_thread::sleep_for(reconnect_interval_);
-                    continue; // Retry after waiting for the interval
+                    continue;
                 }
             }
 
             std::vector<uint8_t> buff(TOF_LENGTH);
-            size_t bytes_received = 0;
+            DWORD bytes_read = 0;
 
             // Flush the serial port buffer before reading
-            tcflush(fd_, TCIFLUSH);
+            PurgeComm(h_serial_, PURGE_RXCLEAR | PURGE_TXCLEAR);
 
-            // Read data until we have enough bytes
-            while (bytes_received < TOF_LENGTH) {
-                ssize_t n = read(fd_, buff.data() + bytes_received, TOF_LENGTH - bytes_received);
-                if (n > 0) {
-                    bytes_received += n;
-                } else if (n < 0) {
+            while (bytes_read < TOF_LENGTH) {
+                DWORD bytes_to_read = TOF_LENGTH - bytes_read;
+                DWORD bytes_now = 0;
+                if (!ReadFile(h_serial_, buff.data() + bytes_read, bytes_to_read, &bytes_now, NULL)) {
                     RCLCPP_ERROR(this->get_logger(), "Read error on port %s, attempting to reconnect...", serial_name_.c_str());
                     close_serial_port();
                     std::this_thread::sleep_for(reconnect_interval_);
-                    break; // Exit the inner loop and attempt to reconnect
+                    break;
                 }
+                bytes_read += bytes_now;
             }
 
-            if (bytes_received == TOF_LENGTH) {
+            if (bytes_read == TOF_LENGTH) {
                 std::lock_guard<std::mutex> lock(mtx_);
                 if (buff[0] == TOF_HEADER[0] && buff[1] == TOF_HEADER[1] && buff[2] == TOF_HEADER[2] && verify_checksum(buff, TOF_LENGTH)) {
                     uint16_t signal = (buff[12]) | (buff[13] << 8);
@@ -136,19 +132,15 @@ private:
                         uint32_t system_time = (buff[4]) | (buff[5] << 8) | (buff[6] << 16) | (buff[7] << 24);
                         uint32_t distance = (buff[8]) | (buff[9] << 8) | (buff[10] << 16);
 
-                        // Publish the distance data
                         auto msg = std_msgs::msg::Float64();
                         msg.data = static_cast<double>(distance);
                         distance_publisher_->publish(msg);
-
-                        RCLCPP_INFO(this->get_logger(), "verify_checksum: %d", verify_checksum(buff, TOF_LENGTH));
 
                         RCLCPP_INFO(this->get_logger(), "Sensor data: id=%d, system_time=%u, distance=%u, status=%d, signal=%d",
                                     buff[3], system_time, distance, buff[11], signal);
                     }
                 } else {
                     std::ostringstream oss;
-                    RCLCPP_INFO(this->get_logger(), "verify_checksum: %d", verify_checksum(buff, TOF_LENGTH));
                     oss << "Invalid or corrupted data received: ";
                     for (const auto &byte : buff) {
                         oss << "0x" << std::hex << static_cast<int>(byte) << " ";
@@ -156,7 +148,7 @@ private:
                     RCLCPP_WARN(this->get_logger(), "%s", oss.str().c_str());
                 }
             } else {
-                RCLCPP_WARN(this->get_logger(), "Incomplete data received: %zu bytes", bytes_received);
+                RCLCPP_WARN(this->get_logger(), "Incomplete data received: %lu bytes", bytes_read);
             }
         }
     }
@@ -168,13 +160,11 @@ private:
         }
 
         uint32_t checksum = 0;
-        // チェックサムを計算
         for (size_t i = 0; i < length - 1; ++i) {
             checksum += data[i];
         }
         checksum = checksum % 256;
 
-        // チェックサムが一致するか確認
         if (checksum == data[length - 1]) {
             std::cout << "TOF data is ok!" << std::endl;
             return true;
@@ -184,7 +174,6 @@ private:
         }
     }
 
-    // Helper function to generate a valid node name
     static std::string generate_node_name(const std::string &serial_name) {
         std::string base_name = "sensor_node";
         std::string sanitized_name;
@@ -198,7 +187,6 @@ private:
         return base_name + "_" + sanitized_name;
     }
 
-    // Helper function to generate a valid topic name
     std::string generate_topic_name(const std::string &base_name) {
         std::string sanitized_name;
         for (char c : serial_name_) {
@@ -215,17 +203,13 @@ private:
 int main(int argc, char *argv[]) {
     rclcpp::init(argc, argv);
 
-    // List of serial ports
-    // std::vector<std::string> serial_ports = {"/dev/tof0", "/dev/tof1", "/dev/tof2", "/dev/tof3", "/dev/tof4", "/dev/tof5", "/dev/tof6", "/dev/tof7"}; // Example ports
-    std::vector<std::string> serial_ports = {"/dev/ttyUSB0","/dev/ttyUSB1"};// TODO: 一次元ライダーのポート名指定
+    std::vector<std::string> serial_ports = {"COM7", "COM8"}; // Windowsのポート指定
 
-    // Vector to hold sensor nodes
     std::vector<std::shared_ptr<SensorNode>> nodes;
     for (const auto &port : serial_ports) {
-        nodes.push_back(std::make_shared<SensorNode>(port, 115200));
+        nodes.push_back(std::make_shared<SensorNode>(port, CBR_115200));
     }
 
-    // Spin with a dummy node to keep the process alive
     auto dummy_node = rclcpp::Node::make_shared("dummy_node");
     rclcpp::spin(dummy_node);
     rclcpp::shutdown();
