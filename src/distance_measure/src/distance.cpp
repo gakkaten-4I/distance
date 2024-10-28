@@ -203,7 +203,7 @@ private:
 int main(int argc, char *argv[]) {
     rclcpp::init(argc, argv);
 
-    std::vector<std::string> serial_ports = {"COM7", "COM8"}; // Windowsのポート指定
+    std::vector<std::string> serial_ports = {"COM7", "COM8"}; // Windowsのポート指定 デバイスマネージャーより確認
 
     std::vector<std::shared_ptr<SensorNode>> nodes;
     for (const auto &port : serial_ports) {
