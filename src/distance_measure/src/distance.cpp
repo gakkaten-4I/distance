@@ -10,9 +10,17 @@
 #include "std_msgs/msg/float64.hpp"
 
 #define TOF_LENGTH 16
+
+//ここをフィールドとデバイスマネージャーで確認したCOMポートにあわせて変更すること！！！
+#define TOPIC_NAME "f1/distance"
+#define BLUE_COM_PORT "COM7"
+#define RED_COM_PORT "COM9"
+
 const uint8_t TOF_HEADER[3] = {87, 0, 255};
 
 using namespace std::chrono_literals;
+
+int num = 0;
 
 class SensorNode : public rclcpp::Node {
 public:
@@ -23,7 +31,7 @@ public:
         this->declare_parameter<int>("baudrate", baudrate);
 
         // Create a publisher for the distance data
-        distance_publisher_ = this->create_publisher<std_msgs::msg::Float64>(generate_topic_name("distance"), 10);
+        distance_publisher_ = this->create_publisher<std_msgs::msg::Float64>(generate_topic_name(TOPIC_NAME), 10); 
 
         // Create a thread for reading sensor data
         reading_thread_ = std::thread(&SensorNode::read_sensor_data, this);
@@ -189,13 +197,15 @@ private:
 
     std::string generate_topic_name(const std::string &base_name) {
         std::string sanitized_name;
-        for (char c : serial_name_) {
-            if (c == '/' || c == '-') {
-                sanitized_name += '_';
-            } else {
-                sanitized_name += c;
-            }
-        }
+        // for (char c : serial_name_) {
+        //     if (c == '/' || c == '-') {
+        //         sanitized_name += '_';
+        //     } else {
+        //         sanitized_name += c;
+        //     }
+        // }
+        sanitized_name = std::to_string(num);
+        num++;
         return base_name + "_" + sanitized_name;
     }
 };
@@ -203,7 +213,7 @@ private:
 int main(int argc, char *argv[]) {
     rclcpp::init(argc, argv);
 
-    std::vector<std::string> serial_ports = {"COM7", "COM8"}; // Windowsのポート指定 デバイスマネージャーより確認
+    std::vector<std::string> serial_ports = {BLUE_COM_PORT, RED_COM_PORT}; // 青→赤の順でWindowsのポート指定 デバイスマネージャーより確認
 
     std::vector<std::shared_ptr<SensorNode>> nodes;
     for (const auto &port : serial_ports) {
